@@ -1,0 +1,33 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+      - name: Build deployable package
+        env:
+          ADDIN_ORIGIN: ${{ vars.ADDIN_ORIGIN }}
+        run: node scripts/package.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: outlook-forensics-release
+          path: release/*.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.zip
+          generate_release_notes: true
