@@ -1,11 +1,12 @@
-import type { Message, Finding, Result, Severity, Policy, Attachment } from './types';
+import type { Message, Finding, Result, Severity, Policy, AnalyzeOptions } from './types';
 import { parseInternetHeaders, headerAddresses } from './headers';
 import { inspectHtml } from './html';
 import { checkUrl, type Emit } from './url';
-import { BRANDS, FREEMAIL } from './brands';
+import { BRANDS, FREEMAIL, isOfficialHost } from './brands';
+import { inspectPayload } from './payload';
 import { clean, domainOf, fold, hostMatches, leet, regDomain, sameSite } from './util';
 
-export const RULE_VERSION = '3.0.0';
+export const RULE_VERSION = '3.1.0';
 const MAX_HTML = 1024 * 1024, MAX_TEXT = 1024 * 1024, MAX_HEADERS = 256 * 1024;
 const MAX_LINKS = 2000, MAX_ATTACHMENTS = 100, MAX_BYTES = 2 * 1024 * 1024, MAX_FINDINGS_SHOWN = 200, MAX_FINDINGS_INTERNAL = 5000;
 const rank: Record<Severity, number> = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
@@ -35,19 +36,7 @@ const PAYMENT_DOC = /(?:invoice|faktur|payment|remittance|statement|purchase[\s_
 const normName = (name: string) => name.replace(/[\u0000-\u0020\u00a0\u200b-\u200f.]+$/g, '').replace(/^[\u0000-\u0020]+/, '');
 const extOf = (name: string) => (normName(name).toLowerCase().split('.').pop() || '');
 
-function bytesCheck(a: Attachment, i: number, emit: Emit): boolean {
-  const b = a.bytes; if (!b) return false;
-  const name = normName(a.name).toLowerCase();
-  const prefix = new TextDecoder('latin1').decode(b.slice(0, Math.min(b.length, MAX_BYTES)));
-  if (/^%PDF-/.test(prefix)) {
-    if (/\/JavaScript\b|\/JS\b|\/OpenAction\b|\/Launch\b|\/EmbeddedFile\b/i.test(prefix)) emit(`attachment-${i}-pdf-action`, 'high', 'PDF contains active-content indicators', clean(a.name));
-  }
-  if (/^MZ/.test(prefix) && !['exe', 'dll', 'scr'].includes(extOf(name))) emit(`attachment-${i}-magic`, 'high', 'Executable signature inconsistent with filename', clean(a.name));
-  if (/^PK\x03\x04/.test(prefix) && /externalLink|attachedTemplate|TargetMode="External"|vbaProject\.bin/i.test(prefix)) emit(`attachment-${i}-office-external`, 'high', 'Office archive contains external relationship or macro indicator', clean(a.name));
-  return true;
-}
-
-export function analyze(m: Message, policy: Policy = {}): Result {
+export function analyze(m: Message, policy: Policy = {}, opts: AnalyzeOptions = {}): Result {
   const all: Finding[] = [], checks: Result['checks'] = [];
   let truncated = false;
   const emit: Emit = (id, severity, title, evidence) => {
@@ -59,6 +48,9 @@ export function analyze(m: Message, policy: Policy = {}): Result {
   const senderHost = domainOf(m.from);
   const internal = (policy.internalDomains ?? []).map(d => d.toLowerCase());
   const senderInternal = !!senderHost && internal.some(d => hostMatches(senderHost, d));
+  const trusted = (policy.trustedDomains ?? []).map(d => d.toLowerCase());
+  const senderTrusted = senderInternal || (!!senderHost && trusted.some(d => hostMatches(senderHost, d)));
+  const hosts = new Set<string>();
 
   // Body text sources
   let html: ReturnType<typeof inspectHtml> | undefined;
@@ -133,7 +125,7 @@ export function analyze(m: Message, policy: Policy = {}): Result {
 
   // ---- HTML body ---------------------------------------------------------------------------
   let linkIndex = 0, linkCount = 0;
-  const ctx = { senderHost, base: html?.base };
+  const ctx = { senderHost, base: html?.base, onHost: (h: string) => { if (!isOfficialHost(h)) hosts.add(regDomain(h)); } };
   if (html) {
     if (html.forms || html.passwordInputs) emit('html-form', 'high', 'HTML form or credential input', `${html.forms} form(s), ${html.passwordInputs} password field(s)`);
     for (const a of html.formActions) checkUrl(a, '', 'form-action-' + linkIndex++, ctx, emit);
@@ -184,23 +176,36 @@ export function analyze(m: Message, policy: Policy = {}): Result {
       const nm = normName(a.name), n = nm.toLowerCase(), e = extOf(a.name);
       if (dangerous.has(e)) emit(`attachment-${i}-dangerous`, 'high', 'Dangerous or active attachment format', a.name);
       if (macroExt.has(e)) emit(`attachment-${i}-macro`, 'high', 'Macro-capable Office file', a.name);
-      if (htmlLike.has(e)) emit(`attachment-${i}-dangerous-html`, 'low', 'HTML/SVG attachment (HTML-smuggling carrier; opens locally)', a.name);
-      if (archives.has(e)) emit(`attachment-${i}-archive`, 'low', 'Archive contents not inspected', a.name);
-      if (nestedMail.has(e)) emit(`attachment-${i}-nested-message`, 'medium', 'Attached message; its content and links are not inspected', a.name);
+      if (htmlLike.has(e) && !senderTrusted) emit(`attachment-${i}-dangerous-html`, 'low', 'HTML/SVG attachment (HTML-smuggling carrier; opens locally)', a.name);
+      if (archives.has(e) && !senderTrusted) emit(`attachment-${i}-archive`, 'low', 'Archive contents not inspected', a.name);
+      if (nestedMail.has(e) && !senderTrusted) emit(`attachment-${i}-nested-message`, 'medium', 'Attached message; its content and links are not inspected', a.name);
       if (/[\u202a-\u202e\u2066-\u2069]/.test(a.name)) emit(`attachment-${i}-bidi`, 'high', 'Bidirectional Unicode filename spoofing', a.name);
       if (n.split('.').length > 2 && dangerous.has(e)) emit(`attachment-${i}-double`, 'medium', 'Multiple-extension active file', a.name);
       if (/^image\//i.test(a.contentType || '') && MFA_IMG_NAME.test(n)) emit(`attachment-${i}-qr-image`, 'medium', 'Image attachment named like an MFA / QR / verification lure', a.name);
-      if (PAYMENT_DOC.test(n) && ['pdf', 'doc', 'docx', 'xls', 'xlsx'].includes(e) && !senderInternal) emit(`attachment-${i}-payment-doc`, 'medium', 'Payment-themed document from a non-internal sender; contents are not inspected', a.name);
+      if (PAYMENT_DOC.test(n) && ['pdf', 'doc', 'docx', 'xls', 'xlsx'].includes(e) && !senderTrusted) emit(`attachment-${i}-payment-doc`, 'medium', 'Payment-themed document from a non-internal sender; contents are not inspected', a.name);
       if (a.size !== undefined && a.size > MAX_BYTES) emit(`attachment-${i}-size`, 'low', 'Attachment exceeds optional static byte limit', a.name);
-      if (!bytesCheck(a, i, emit)) allBytes = false;
+      if (a.url) checkUrl(a.url, '', `attachment-${i}-cloud-url`, ctx, emit);
+      if (a.bytes) inspectPayload(a.name, a.bytes, i, ctx, emit, MAX_BYTES); else allBytes = false;
     }
     if (m.attachments.length > MAX_ATTACHMENTS) { truncated = true; emit('attachment-limit', 'medium', 'Attachment count exceeded limit', String(m.attachments.length)); }
     checks.push({ name: 'Attachment metadata', state: m.attachments.length > MAX_ATTACHMENTS ? 'partial' : 'evaluated', detail: `${Math.min(m.attachments.length, MAX_ATTACHMENTS)} filenames inspected` });
-    checks.push({ name: 'Attachment payloads', state: m.attachments.length === 0 ? 'evaluated' : allBytes ? 'partial' : 'unavailable', detail: m.attachments.length === 0 ? 'No attachments' : allBytes ? 'Only bounded signatures; no full parser or sandbox' : 'Payload bytes not fetched; content not inspected' });
+    checks.push({ name: 'Attachment payloads', state: m.attachments.length === 0 ? 'evaluated' : allBytes ? 'partial' : 'unavailable', detail: m.attachments.length === 0 ? 'No attachments' : allBytes ? 'Signatures, ZIP member names, PDF link annotations and HTML/EML content inspected; no decompression, macro parsing or sandbox' : 'Some attachment bytes were not readable (too large, cloud, error); those are judged by name only' });
   } else {
     checks.push({ name: 'Attachment metadata', state: 'unavailable', detail: 'Attachment list unavailable' });
     checks.push({ name: 'Attachment payloads', state: 'unavailable', detail: 'Attachment payloads unavailable' });
   }
+  const ages = opts.domainAges;
+  if (ages) {
+    const now = opts.now ?? 0;
+    for (const d of hosts) {
+      const iso = ages[d]; if (!iso || trusted.some(t => hostMatches(d, t)) || internal.some(t => hostMatches(d, t))) continue;
+      const days = (now - Date.parse(iso)) / 86400000;
+      if (!Number.isFinite(days) || days < 0) continue;
+      if (days < 7) emit(`domain-age-${d}`, 'high', 'Linked domain was registered less than 7 days ago', `${d} (${Math.floor(days)} d)`);
+      else if (days < 30) emit(`domain-age-${d}`, 'medium', 'Linked domain was registered less than 30 days ago', `${d} (${Math.floor(days)} d)`);
+    }
+    checks.push({ name: 'Domain age', state: 'partial', detail: `Opt-in RDAP lookup: ${Object.keys(ages).length} of ${hosts.size} linked domain(s) resolved` });
+  } else checks.push({ name: 'Domain age', state: 'unavailable', detail: 'Opt-in lookup disabled (local-only default)' });
   if (truncated) checks.push({ name: 'Resource limits', state: 'partial', detail: 'One or more inputs were truncated or capped' });
 
   // ---- Verdict ---------------------------------------------------------------------------
@@ -215,5 +220,5 @@ export function analyze(m: Message, policy: Policy = {}): Result {
     count('high') + count('critical') > 0 ? 'likely-phishing'
     : count('medium') > 0 || count('low') >= 2 ? 'review'
     : unavailable.length ? 'insufficient-evidence' : 'no-known-indicators';
-  return { verdict, findings: shown, checks, ruleVersion: RULE_VERSION, coverage: { complete: unavailable.length === 0, unavailable }, truncated };
+  return { verdict, findings: shown, checks, ruleVersion: RULE_VERSION, coverage: { complete: unavailable.length === 0, unavailable }, truncated, hosts: [...hosts].sort().slice(0, 50) };
 }

@@ -2,7 +2,7 @@ import type { Severity } from './types';
 import { BRANDS, USER_CONTENT_HOSTS, URL_SHORTENERS, isOfficialHost } from './brands';
 import { clean, hostMatches, idnRisk, leet, regDomain, sameSite } from './util';
 export type Emit = (id: string, severity: Severity, title: string, evidence: string) => void;
-export interface UrlCtx { senderHost: string; base?: string; internalOnly?: boolean }
+export interface UrlCtx { senderHost: string; base?: string; onHost?: (host: string) => void }
 
 const SAFE_SCHEMES = new Set(['http', 'https', 'mailto', 'tel', 'sms', 'cid', 'callto']);
 const DANGEROUS_SCHEMES = new Set(['javascript', 'data', 'vbscript', 'file', 'ms-msdt', 'search-ms', 'search', 'ms-excel', 'ms-word', 'ms-powerpoint', 'ms-access', 'ms-officecmd', 'ms-appinstaller', 'ms-infopath', 'ms-its', 'mhtml', 'shell', 'ms-cxh', 'ms-cxh-full', 'ms-vsto', 'ms-visio', 'ms-project', 'ms-publisher', 'ms-spd', 'ms-windows-store', 'ms-settings', 'ie', 'microsoft-edge']);
@@ -51,6 +51,7 @@ export function checkUrl(raw: string, label: string, id: string, ctx: UrlCtx, em
   const { url, wrapped } = unwrap(u);
   const host = url.hostname.toLowerCase().replace(/\.$/, '');
   if (!host) return;
+  ctx.onHost?.(host);
   const unsubscribe = /unsubscribe|opt[-_ ]?out|preferences?|wypisz/i.test(label + ' ' + url.pathname);
 
   if (url.protocol === 'http:') emit(id + '-http', unsubscribe ? 'low' : 'medium', 'Unencrypted HTTP URL', clean(url.href));

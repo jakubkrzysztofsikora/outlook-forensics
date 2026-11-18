@@ -26,8 +26,8 @@ jobs:
       - run: npm audit --omit=dev --audit-level=high
       - name: Check prohibited runtime network calls
         run: |
-          if grep -REn 'fetch\(|XMLHttpRequest|new WebSocket\(' src/; then
-            echo 'Unexpected network API in application source'; exit 1
+          if grep -REn 'fetch\(|XMLHttpRequest|new WebSocket\(|sendBeacon' src/ --exclude=rdap.ts; then
+            echo 'Unexpected network API outside src/outlook/rdap.ts'; exit 1
           fi
       - uses: actions/upload-artifact@v4
         with:

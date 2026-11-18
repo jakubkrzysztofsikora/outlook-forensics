@@ -10,7 +10,8 @@ Detection bypasses (a phishing email that scores clean) are welcome as normal is
 
 ## Design notes
 
-- No runtime network calls, telemetry or message storage are intended; CI blocks `fetch(`, `XMLHttpRequest` and `WebSocket` in `src/`.
+- No runtime network calls, telemetry or message storage by default; CI blocks `fetch(`, `XMLHttpRequest`, `WebSocket` and `sendBeacon` in `src/` except the opt-in `src/outlook/rdap.ts`, which sends only link domain names and only when built with `VITE_RDAP_ORIGIN`.
+- Attachment content is read in memory for static inspection and is never saved, opened, executed or transmitted.
 - The task pane must be served over HTTPS and needs network access to load.
 - Message HTML is parsed, never rendered, and no resource it references is fetched.
 - `Authentication-Results` passes are not trusted; only failures are surfaced.

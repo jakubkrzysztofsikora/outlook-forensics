@@ -15,9 +15,16 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Write organisation policy (optional secret POLICY_TS)
+        env:
+          POLICY_TS: ${{ secrets.POLICY_TS }}
+        run: |
+          if [ -n "$POLICY_TS" ]; then printf '%s\n' "$POLICY_TS" > src/policy.local.ts; echo 'policy.local.ts written'; else echo '::warning::POLICY_TS secret not set: building with an EMPTY policy (no impersonation checks for your people)'; fi
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+        env:
+          VITE_RDAP_ORIGIN: ${{ vars.RDAP_ORIGIN }}
       - run: npm audit --omit=dev --audit-level=high
       - name: Build deployable package
         env:

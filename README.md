@@ -19,20 +19,31 @@ A local-only, deterministic **analyst helper** for Outlook. It runs in the task 
 - **Sender identity**: From / Reply-To / Sender / Return-Path consistency, multiple `From` headers, display name containing another address, built-in brand list plus your protected names (zero-width and Cyrillic/Greek confusables folded), leet look-alike domains (`micr0soft`), executive title from a free-mail domain.
 - **Headers**: `Authentication-Results` and Defender verdict headers. **Passes are never trusted** (the header is sender-forgeable). A reported *failure* is surfaced, because an attacker gains nothing by forging one.
 - **Body language**: credential-lockout lures with an external link, BEC phrasing, bank-detail change with IBAN, callback phishing, ClickFix paste-and-run commands, device-code sign-in lures, QR lures (image not decoded).
-- **Attachments** (names and metadata): dangerous/active formats incl. `.rdp`, `.msix`, `.appinstaller`, `.library-ms`, macro-capable Office files, bidi/double extensions, trailing dot/space tricks, nested `.eml`/`.msg`, MFA/QR-named images, payment-themed documents from non-internal senders.
+- **Attachments, by name**: dangerous/active formats incl. `.rdp`, `.msix`, `.appinstaller`, `.library-ms`, macro-capable Office files, bidi/double extensions, trailing dot/space tricks, nested `.eml`/`.msg`, MFA/QR-named images, payment-themed documents from senders that are not internal or trusted.
+- **Attachments, by content** (read in memory via `getAttachmentContentAsync`, up to 10 files / 2 MB each / 10 MB total; nothing is saved or opened): executable signature under a false name; ZIP member names (executables, path traversal, encrypted archives, VBA projects, embedded OLE/ActiveX); PDF `/URI` links and active-content markers; HTML/SVG attachments (login forms, links, HTML-smuggling `atob`/`Blob`); links inside attached `.eml`; cloud-attachment URLs.
 
 ## Known limits (read before relying on it)
 
-- **Attachment bytes are not fetched.** The byte-signature checks exist but are not exercised in normal Outlook operation. No ZIP members, Office relationships, PDF streams or QR payloads are inspected.
-- No domain age, reputation, DNS, SPF/DKIM/DMARC cryptographic verification, or URL detonation. Newly registered clean-looking phishing domains with no other tell will pass.
-- Medium rules such as "payment-themed PDF from an external sender" and "form-platform link" will fire on some legitimate mail by design.
+- **Attachment content is inspected shallowly.** Nothing is decompressed, so macros and external relationships inside compressed OOXML parts, links inside compressed PDF object streams, nested archive members, scanned images and QR payloads are not seen. Files over 2 MB, beyond the 10th attachment, or that Outlook refuses to hand over are judged by name only. No sandbox.
+- **Domain age is off by default** (see below). Without it, a freshly registered clean-looking phishing domain with no other tell will pass. There is no reputation feed and no SPF/DKIM/DMARC cryptographic verification.
+- Medium rules such as "payment-themed PDF from a non-internal sender" and "form-platform link" fire on some legitimate mail by design. Put regular vendors in `trustedDomains` to silence the payment, archive, HTML-attachment and nested-message nuisance rules for them. This never silences executable, macro, form or link-mismatch findings.
 - English and Polish lure wording only. Other languages rely on structural rules.
 - Outlook support differs by client; the add-in is user-pulled, so there are no silent background scans. `item.replyTo` does not exist in read mode, so Reply-To comes from raw headers.
-- Detection quality is measured only against the bundled corpora (110 tests including 39+28 hand-written attack and false-positive cases). That is regression protection, not a detection rate.
+- Detection quality is measured only against the bundled corpora (123 tests, including 67 hand-written attack and false-positive cases). That is regression protection, not a detection rate.
 
-## Configure
+## Configure your organisation
 
-Edit `src/policy.ts` before building: `internalDomains` (enables external-sender-with-internal-subject and suppresses the payment-document rule for your own senders) and `protectedNames` (executives, brands). The shipped policy is empty on purpose, so impersonation of *your* people is **not** checked until you fill it in.
+The shipped policy is empty on purpose, so impersonation of *your* people is **not** checked until you configure it. Copy `src/policy.example.ts` to `src/policy.local.ts` (gitignored, never committed) and fill in:
+
+- `internalDomains`: your mail domains.
+- `trustedDomains`: vendors you routinely get invoices, archives or HTML reports from.
+- `protectedNames`: executives, finance, HR, brands. Matching ignores case, accents, zero-width characters and Cyrillic/Greek look-alikes. `domains` lists the only legitimate sender domains for that name.
+
+For CI releases store the same file contents in the repository secret `POLICY_TS`; the release workflow writes it to `src/policy.local.ts` before building and warns loudly if it is missing.
+
+## Optional: newly-registered-domain check
+
+Off by default to keep the local-only guarantee. To enable it, build with `VITE_RDAP_ORIGIN=https://rdap.org` (or your own RDAP service; in CI set the repository variable `RDAP_ORIGIN`). The CSP is widened to that one origin at build time. Only the registrable **domain names** found in links are sent (max 8 per message, no cookies, no referrer); never message content, sender, subject or recipients. Links to domains registered under 7 days are **high**, under 30 days **medium**. The pane header and verdict card show `DOMAIN LOOKUP ON` when it is enabled. The lookup itself is the only code allowed to use a network API (`src/outlook/rdap.ts`); CI enforces that.
 
 ## Develop
 
@@ -47,7 +58,7 @@ Dev server (developer machines only): create a locally trusted certificate for `
 LOCAL_HTTPS_KEY=./localhost-key.pem LOCAL_HTTPS_CERT=./localhost.pem npm run dev
 ```
 
-and sideload `manifest.xml` via Outlook **Get Add-ins → My add-ins → Add a custom add-in**. `public/icon.png` is a placeholder; replace it before distribution.
+and sideload `manifest.xml` via Outlook **Get Add-ins → My add-ins → Add a custom add-in**. Icons are in `public/icon-*.png` (16, 32, 64, 80, 128); swap in your own branding if you like.
 
 ## Deploy
 
@@ -55,7 +66,7 @@ Localhost hosting is for development. For real use host the built `dist/` on an 
 
 ## Privacy
 
-Analysis runs in the browser pane. The CSP restricts the app's own connections to `self` (`connect-src 'self'`); Outlook itself and Microsoft's Office.js CDN are outside the app's control. Nothing is stored. CI fails if `fetch(`, `XMLHttpRequest` or `WebSocket` appears in `src/`.
+Analysis runs in the browser pane. By default the CSP restricts the app's own connections to `self` (`connect-src 'self'`); Outlook itself and Microsoft's Office.js CDN are outside the app's control. Nothing is stored. CI fails if `fetch(`, `XMLHttpRequest`, `WebSocket` or `sendBeacon` appears in `src/` outside the opt-in `src/outlook/rdap.ts`. Attachment content is read in memory only, never saved, opened or transmitted.
 
 ## Security
 

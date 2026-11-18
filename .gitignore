@@ -7,3 +7,6 @@ release/
 *.key
 .DS_Store
 coverage/
+
+# Organisation policy (never commit)
+src/policy.local.ts
